@@ -213,6 +213,32 @@ function normalizeStructuredResponse(questionText: string, raw: unknown, fallbac
   };
 }
 
+function toStructuredFromRawText(questionText: string, rawText: string) {
+  const summary = rawText.replace(/\s+/g, " ").trim() || "Here is the NCERT-based solution.";
+  return normalizeStructuredResponse(
+    questionText,
+    {
+      title: "NCERT-based solution",
+      summary,
+      steps: [{ title: "Core NCERT idea", body: summary }],
+      equations: ["Use the relevant NCERT formula and substitute known values step-by-step."],
+      sources: buildNcertSources(questionText),
+      confidence: 92
+    },
+    summary,
+    92
+  );
+}
+
+function parseOllamaStructuredResponse(questionText: string, text: string) {
+  try {
+    const parsed = JSON.parse(extractJsonCandidate(text)) as unknown;
+    return normalizeStructuredResponse(questionText, parsed, "Here is the NCERT-based solution.", 96);
+  } catch {
+    return toStructuredFromRawText(questionText, text);
+  }
+}
+
 function getCannedReply(questionText: string): DoubtAssistantReply {
   const sources = buildNcertSources(questionText).slice(0, 2);
   const confidence = 0.9;
@@ -238,7 +264,7 @@ function getCannedReply(questionText: string): DoubtAssistantReply {
 
 async function callOllama(questionText: string, traceId: string): Promise<DoubtAssistantReply> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), env.doubtAiTimeoutMs);
+  const timer = setTimeout(() => controller.abort("DOUBT_AI_TIMEOUT"), env.doubtAiTimeoutMs);
 
   const systemPrompt = [
     "You are Lakshay AI's doubt solver.",
@@ -277,7 +303,8 @@ async function callOllama(questionText: string, traceId: string): Promise<DoubtA
           format: "json",
           stream: false,
           options: {
-            temperature: 0.2
+            temperature: 0.2,
+            num_predict: 320
           }
         })
       }
@@ -293,8 +320,7 @@ async function callOllama(questionText: string, traceId: string): Promise<DoubtA
     if (!text) {
       throw new Error("Ollama returned no parseable text.");
     }
-    const parsed = JSON.parse(extractJsonCandidate(text)) as any;
-    const structuredResponse = normalizeStructuredResponse(questionText, parsed, "Here is the NCERT-based solution.", 96);
+    const structuredResponse = parseOllamaStructuredResponse(questionText, text);
 
     debugLog(traceId, "ollama success", {
       sourceCount: structuredResponse.sources.length,

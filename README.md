@@ -55,7 +55,7 @@ SUPABASE_SERVICE_ROLE_KEY=...
 PORT=4000
 CORS_ORIGIN=http://localhost:5173
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=gemma3:1b
+OLLAMA_MODEL=gemma3:4b
 ```
 
 ## 4) Database Migrations (Supabase SQL)
@@ -154,7 +154,7 @@ Defined in `src/lib/env.ts`.
 ### Ollama / AI
 
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (default `gemma3:1b`)
+- `OLLAMA_MODEL` (default `gemma3:4b`)
 - `PLANNER_LLM_TIMEOUT_MS` (default `20000`)
 
 ### Multimodal + transcript helper

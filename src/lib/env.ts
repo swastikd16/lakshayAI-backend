@@ -18,7 +18,7 @@ export const env = {
 
   // Ollama AI settings (used for planner + doubt solver).
   ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
-  ollamaModel: process.env.OLLAMA_MODEL ?? "gemma3:1b",
+  ollamaModel: process.env.OLLAMA_MODEL ?? "gemma3:4b",
   // Legacy provider keys retained for backward compatibility (unused in current runtime path).
   geminiApiKey: process.env.GEMINI_API_KEY ?? null,
   geminiModel: process.env.GEMINI_MODEL ?? "gemini-2.0-flash",
@@ -31,5 +31,5 @@ export const env = {
 
   // Doubt AI runtime diagnostics
   doubtAiDebug: String(process.env.DOUBT_AI_DEBUG ?? "false").toLowerCase() === "true",
-  doubtAiTimeoutMs: Number(process.env.DOUBT_AI_TIMEOUT_MS ?? 8000)
+  doubtAiTimeoutMs: Number(process.env.DOUBT_AI_TIMEOUT_MS ?? 30000)
 };

@@ -5,10 +5,26 @@ import { requireAuth } from "../middleware/auth";
 import { getAdaptiveQuestion, getQuestionExplanation, getQuestionHint } from "../services/adaptiveQuestionService";
 import { regenerateWithAgentSafe } from "../services/studyPlanService";
 
+const CONTROL_LATEX_REPAIRS: Array<{ pattern: RegExp; replacement: string }> = [
+  { pattern: /\u0008(?=[A-Za-z{])/g, replacement: "\\b" },
+  { pattern: /\u0009(?=[A-Za-z{])/g, replacement: "\\t" },
+  { pattern: /\u000A(?=[A-Za-z{])/g, replacement: "\\n" },
+  { pattern: /\u000C(?=[A-Za-z{])/g, replacement: "\\f" },
+  { pattern: /\u000D(?=[A-Za-z{])/g, replacement: "\\r" }
+];
+
+function normalizeMathRichText(raw: unknown) {
+  let value = String(raw ?? "").trim();
+  CONTROL_LATEX_REPAIRS.forEach(({ pattern, replacement }) => {
+    value = value.replace(pattern, replacement);
+  });
+  return value;
+}
+
 function normalizeOptions(options: Record<string, string>) {
   const entries = Object.entries(options ?? {});
   if (entries.length > 0) {
-    return entries.map(([id, text]) => ({ id, text }));
+    return entries.map(([id, text]) => ({ id, text: normalizeMathRichText(text) }));
   }
 
   return [
@@ -35,9 +51,9 @@ function formatQuestion(question: {
     subject: question.subject,
     topic: question.topic,
     difficulty: question.difficulty,
-    prompt: question.prompt,
+    prompt: normalizeMathRichText(question.prompt),
     options: normalizeOptions(question.options),
-    solutionSteps: Array.isArray(question.solution_steps) ? question.solution_steps : [],
+    solutionSteps: Array.isArray(question.solution_steps) ? question.solution_steps.map((step) => normalizeMathRichText(step)) : [],
     correctOption: question.correct_option ?? null,
     verifiedAnswer: question.correct_option ?? null,
     source: question.source ?? null
@@ -552,7 +568,7 @@ async function buildAdaptiveReview(userId: string, sessionId: string) {
       questionId: row.question_id,
       subject: question?.subject ?? "General",
       topic: question?.topic ?? "Concept",
-      prompt: question?.prompt ?? "Question unavailable",
+      prompt: normalizeMathRichText(question?.prompt ?? "Question unavailable"),
       status: row.is_correct ? "correct" : "incorrect",
       timeSpentSec: Number(row.time_spent_sec ?? 0),
       selectedOption: row.selected_option,

@@ -44,6 +44,13 @@ type HintResult = {
 
 const OPTION_IDS: OptionId[] = ["A", "B", "C", "D"];
 const DIFFICULTIES = new Set<SupportedDifficulty>(["easy", "medium", "hard", "adaptive"]);
+const CONTROL_LATEX_REPAIRS: Array<{ pattern: RegExp; replacement: string }> = [
+  { pattern: /\u0008(?=[A-Za-z{])/g, replacement: "\\b" },
+  { pattern: /\u0009(?=[A-Za-z{])/g, replacement: "\\t" },
+  { pattern: /\u000A(?=[A-Za-z{])/g, replacement: "\\n" },
+  { pattern: /\u000C(?=[A-Za-z{])/g, replacement: "\\f" },
+  { pattern: /\u000D(?=[A-Za-z{])/g, replacement: "\\r" }
+];
 
 function normalizeDifficulty(value: unknown): SupportedDifficulty {
   const candidate = String(value ?? "").trim().toLowerCase();
@@ -95,10 +102,25 @@ function repairJsonText(text: string) {
   return candidate;
 }
 
+function escapeUnescapedMathBackslashes(candidate: string) {
+  return candidate.replace(/(?<!\\)\\([A-Za-z])/g, (_match, commandStart: string) => `\\\\${commandStart}`);
+}
+
+function normalizeMathRichText(raw: unknown) {
+  let value = String(raw ?? "").trim();
+  CONTROL_LATEX_REPAIRS.forEach(({ pattern, replacement }) => {
+    value = value.replace(pattern, replacement);
+  });
+  return value;
+}
+
 function tryParseJson(rawText: string): any | null {
-  const candidates = Array.from(
-    new Set([extractJsonCandidate(rawText), repairJsonText(rawText), repairJsonText(extractJsonCandidate(rawText))].filter(Boolean))
-  );
+  const extracted = extractJsonCandidate(rawText);
+  const repaired = repairJsonText(rawText);
+  const repairedExtracted = repairJsonText(extracted);
+  const candidates = Array.from(new Set([extracted, repaired, repairedExtracted]
+    .flatMap((candidate) => [candidate, escapeUnescapedMathBackslashes(candidate)])
+    .filter(Boolean)));
 
   for (const candidate of candidates) {
     try {
@@ -121,7 +143,7 @@ function normalizeOptions(raw: unknown): Record<OptionId, string> | null {
 
   OPTION_IDS.forEach((id) => {
     const value = source[id] ?? source[id.toLowerCase()];
-    const text = String(value ?? "").trim();
+    const text = normalizeMathRichText(value);
     if (text) {
       normalized[id] = text;
     }
@@ -145,7 +167,7 @@ function normalizeSolutionSteps(raw: unknown): string[] {
   }
 
   return raw
-    .map((step) => String(step ?? "").trim())
+    .map((step) => normalizeMathRichText(step))
     .filter(Boolean)
     .slice(0, 6);
 }
@@ -158,7 +180,7 @@ function sanitizeQuestionCandidate(
   const nested = record.question && typeof record.question === "object" ? record.question : record;
   const subject = String(nested.subject ?? requested.subject ?? "").trim();
   const topic = String(nested.topic ?? requested.topic ?? "").trim();
-  const prompt = String(nested.prompt ?? nested.question ?? "").trim();
+  const prompt = normalizeMathRichText(nested.prompt ?? nested.question);
   const options = normalizeOptions(nested.options);
   const correctOption = normalizeOptionId(nested.correct_option ?? nested.correctOption ?? nested.answer);
   const solutionSteps = normalizeSolutionSteps(nested.solution_steps ?? nested.solutionSteps ?? nested.explanation_steps);
@@ -182,7 +204,7 @@ function sanitizeExplanation(raw: any): ExplanationResult | null {
   const record = raw && typeof raw === "object" ? raw : {};
   const nested = record.explanation && typeof record.explanation === "object" ? record.explanation : record;
   const solutionSteps = normalizeSolutionSteps(nested.solution_steps ?? nested.solutionSteps ?? nested.steps);
-  const aiSolution = String(nested.summary ?? nested.explanation ?? nested.answer ?? "").trim();
+  const aiSolution = normalizeMathRichText(nested.summary ?? nested.explanation ?? nested.answer);
 
   if (solutionSteps.length === 0 && !aiSolution) {
     return null;
@@ -197,7 +219,7 @@ function sanitizeExplanation(raw: any): ExplanationResult | null {
 
 function sanitizeHint(raw: any): HintResult | null {
   const record = raw && typeof raw === "object" ? raw : {};
-  const hint = String(record.hint ?? record.clue ?? record.tip ?? "").trim();
+  const hint = normalizeMathRichText(record.hint ?? record.clue ?? record.tip);
   if (!hint) {
     return null;
   }
@@ -260,6 +282,7 @@ async function generateQuestionWithOllama(
     "options must be an object with exactly four keys: A, B, C, D.",
     "correct_option must be one of A, B, C, D.",
     "solution_steps must be an array of 2 to 5 short instructional strings.",
+    "If you include math notation, use LaTeX wrapped in $...$ and escape backslashes for JSON (example: \\\\frac{a}{b}).",
     "Keep the question aligned to competitive exam prep.",
     "",
     `Exam type: ${examType}`,
@@ -348,7 +371,7 @@ function sanitizeStoredQuestion(row: any): StoredQuestionRow | null {
     subject: String(row.subject),
     topic: String(row.topic),
     difficulty: normalizeDifficulty(row.difficulty),
-    prompt: String(row.prompt),
+    prompt: normalizeMathRichText(row.prompt),
     options,
     correct_option: correctOption,
     solution_steps: normalizeSolutionSteps(row.solution_steps)
