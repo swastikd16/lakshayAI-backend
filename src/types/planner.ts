@@ -14,6 +14,14 @@ export type RecentSessionAccuracy = {
   subject: string | null;
 };
 
+export type PlannerCalendarView = "week" | "month";
+
+export type PlannerCalendarDay = {
+  day: string;
+  date: string;
+  active: boolean;
+};
+
 /**
  * Context fed to the planner agent (LLM or fallback).
  */
@@ -59,4 +67,53 @@ export type RebalanceMetadata = {
 export type PlannerAgentOutput = {
   items: PlannerBlock[];
   rebalance: RebalanceMetadata;
+};
+
+export type PlannerCalendarPayload = {
+  view: PlannerCalendarView;
+  rangeStartDate: string;
+  rangeEndDate: string;
+  rangeLabel: string;
+  monthStartDate?: string;
+  monthLabel?: string;
+  calendarLabel?: string;
+  weekStartDate: string;
+  weekLabel: string;
+  weekDays: PlannerCalendarDay[];
+  calendarDays: PlannerCalendarDay[];
+  days?: Array<{
+    date: string;
+    weekday: string;
+    monthLabel: string;
+    inCurrentMonth: boolean;
+    active: boolean;
+    items: Array<{
+      id: string;
+      startsAt: string;
+      endsAt: string;
+      subject: string;
+      topic: string;
+      type: "study" | "revision" | "test";
+    }>;
+  }>;
+  items: Array<{
+    id: string;
+    startsAt: string;
+    endsAt: string;
+    subject: string;
+    topic: string;
+    type: "study" | "revision" | "test";
+  }>;
+  weakTopics: {
+    id: string;
+    title: string;
+    riskLevel: string;
+    retentionEstimate: number;
+    severity: string;
+    copy: string;
+    icon: string;
+  }[];
+  focusMessage: string;
+  plannerSource: "llm" | "fallback";
+  usedFallback: boolean;
 };

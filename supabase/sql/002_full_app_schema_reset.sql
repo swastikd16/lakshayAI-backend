@@ -132,6 +132,7 @@ create table public.revision_items (
   user_id uuid not null references public.app_users(id) on delete cascade,
   subject text not null,
   topic text not null,
+  origin text not null default 'adaptive' check (origin in ('diagnostic', 'adaptive', 'manual')),
   risk_level text not null default 'medium' check (risk_level in ('critical', 'high', 'medium', 'low')),
   retention_estimate numeric(5,2) not null default 70,
   last_review_at timestamptz,
@@ -241,6 +242,7 @@ create index idx_questions_exam_topic_diff on public.questions(exam_type, topic,
 create index idx_practice_sessions_user_id_started_at on public.practice_sessions(user_id, started_at desc);
 create index idx_practice_attempts_session_id_created_at on public.practice_attempts(session_id, created_at desc);
 create index idx_revision_items_user_id_updated_at on public.revision_items(user_id, updated_at desc);
+create index idx_revision_items_user_origin_updated_at on public.revision_items(user_id, origin, updated_at desc);
 create index idx_revision_reviews_item_reviewed_at on public.revision_reviews(revision_item_id, reviewed_at desc);
 create index idx_doubt_threads_user_id_updated_at on public.doubt_threads(user_id, updated_at desc);
 create index idx_doubt_messages_thread_created_at on public.doubt_messages(thread_id, created_at);

@@ -22,7 +22,7 @@ export type DoubtAssistantReply = {
 };
 
 export type DoubtReplyMeta = {
-  provider: "gemini" | "deterministic" | "canned";
+  provider: "ollama" | "deterministic" | "canned";
   geminiAttempted: boolean;
   traceId: string;
 };
@@ -54,22 +54,6 @@ function extractJsonCandidate(text: string) {
   }
 
   return trimmed;
-}
-
-function parseGeminiTextResponse(raw: any): string {
-  const parts = raw?.candidates?.[0]?.content?.parts;
-  const text = Array.isArray(parts)
-    ? parts
-        .map((part: any) => (typeof part?.text === "string" ? part.text : ""))
-        .join("\n")
-        .trim()
-    : "";
-
-  if (!text) {
-    throw new Error("Gemini returned no parseable text.");
-  }
-
-  return text;
 }
 
 function uniqueStrings(values: string[]) {
@@ -252,11 +236,7 @@ function getCannedReply(questionText: string): DoubtAssistantReply {
   };
 }
 
-async function callGemini(questionText: string, traceId: string): Promise<DoubtAssistantReply> {
-  if (!env.geminiApiKey) {
-    throw new Error("GEMINI_API_KEY not set");
-  }
-
+async function callOllama(questionText: string, traceId: string): Promise<DoubtAssistantReply> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), env.doubtAiTimeoutMs);
 
@@ -272,41 +252,32 @@ async function callGemini(questionText: string, traceId: string): Promise<DoubtA
     "confidence: number from 0 to 100."
   ].join(" ");
 
-  debugLog(traceId, "gemini start", {
-    model: env.geminiModel,
+  debugLog(traceId, "ollama start", {
+    model: env.ollamaModel,
     promptLength: questionText.length,
     timeoutMs: env.doubtAiTimeoutMs
   });
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${env.geminiModel}:generateContent?key=${env.geminiApiKey}`,
+      `${env.ollamaBaseUrl.replace(/\/+$/, "")}/api/generate`,
       {
         method: "POST",
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          systemInstruction: {
-            parts: [{ text: systemPrompt }]
-          },
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: [
-                    "Answer this academic doubt using NCERT only.",
-                    "Question:",
-                    questionText
-                  ].join("\n")
-                }
-              ]
-            }
-          ],
-          generationConfig: {
-            responseMimeType: "application/json",
-            temperature: 0.2,
-            maxOutputTokens: 1200
+          model: env.ollamaModel,
+          prompt: [
+            systemPrompt,
+            "",
+            "Answer this academic doubt using NCERT only.",
+            "Question:",
+            questionText
+          ].join("\n"),
+          format: "json",
+          stream: false,
+          options: {
+            temperature: 0.2
           }
         })
       }
@@ -314,15 +285,18 @@ async function callGemini(questionText: string, traceId: string): Promise<DoubtA
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      throw new Error(`Gemini HTTP ${response.status}: ${body.slice(0, 300)}`);
+      throw new Error(`Ollama HTTP ${response.status}: ${body.slice(0, 300)}`);
     }
 
     const json = (await response.json()) as any;
-    const text = parseGeminiTextResponse(json);
+    const text = typeof json?.response === "string" ? json.response.trim() : "";
+    if (!text) {
+      throw new Error("Ollama returned no parseable text.");
+    }
     const parsed = JSON.parse(extractJsonCandidate(text)) as any;
     const structuredResponse = normalizeStructuredResponse(questionText, parsed, "Here is the NCERT-based solution.", 96);
 
-    debugLog(traceId, "gemini success", {
+    debugLog(traceId, "ollama success", {
       sourceCount: structuredResponse.sources.length,
       confidence: structuredResponse.confidence
     });
@@ -362,29 +336,17 @@ export async function buildDoubtAssistantReply(questionText: string): Promise<Do
   const traceId = randomUUID();
 
   try {
-    if (env.geminiApiKey) {
-      const reply = await callGemini(questionText, traceId);
-      return {
-        reply,
-        meta: {
-          provider: "gemini",
-          geminiAttempted: true,
-          traceId
-        }
-      };
-    }
-
-    const deterministicReply = buildFallbackReply(questionText);
+    const reply = await callOllama(questionText, traceId);
     return {
-      reply: deterministicReply,
+      reply,
       meta: {
-        provider: "deterministic",
-        geminiAttempted: false,
+        provider: "ollama",
+        geminiAttempted: true,
         traceId
       }
     };
   } catch (error) {
-    debugLog(traceId, "gemini failure", {
+    debugLog(traceId, "ollama failure", {
       error: error instanceof Error ? error.message : String(error)
     });
 
@@ -394,7 +356,7 @@ export async function buildDoubtAssistantReply(questionText: string): Promise<Do
         reply: deterministicReply,
         meta: {
           provider: "deterministic",
-          geminiAttempted: Boolean(env.geminiApiKey),
+          geminiAttempted: true,
           traceId
         }
       };
@@ -406,7 +368,7 @@ export async function buildDoubtAssistantReply(questionText: string): Promise<Do
         reply: getCannedReply(questionText),
         meta: {
           provider: "canned",
-          geminiAttempted: Boolean(env.geminiApiKey),
+          geminiAttempted: true,
           traceId
         }
       };

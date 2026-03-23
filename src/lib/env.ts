@@ -16,14 +16,15 @@ export const env = {
   supabaseUrl: required("SUPABASE_URL"),
   supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
 
-  // Gemini planner agent settings (preferred if present).
+  // Ollama AI settings (used for planner + doubt solver).
+  ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
+  ollamaModel: process.env.OLLAMA_MODEL ?? "gemma3:1b",
+  // Legacy provider keys retained for backward compatibility (unused in current runtime path).
   geminiApiKey: process.env.GEMINI_API_KEY ?? null,
   geminiModel: process.env.GEMINI_MODEL ?? "gemini-2.0-flash",
-
-  // OpenAI planner agent settings (fallback provider).
   openaiApiKey: process.env.OPENAI_API_KEY ?? null,
   openaiModel: process.env.OPENAI_MODEL ?? "gpt-5-mini",
-  plannerLlmTimeoutMs: Number(process.env.PLANNER_LLM_TIMEOUT_MS ?? 8000),
+  plannerLlmTimeoutMs: Number(process.env.PLANNER_LLM_TIMEOUT_MS ?? 20000),
 
   // Doubt AI runtime diagnostics
   doubtAiDebug: String(process.env.DOUBT_AI_DEBUG ?? "false").toLowerCase() === "true",

@@ -12,9 +12,15 @@ export type AuthSessionDto = {
   user: AuthUserDto;
 };
 
+export type DiagnosticAnswerDto = {
+  questionId: string;
+  selectedOption: string;
+};
+
 export type OnboardingPayloadDto = {
   examType: "JEE" | "NEET" | "UPSC";
   targetDate: string;
   dailyHoursTarget: number;
   confidenceBySubject: Record<string, number>;
+  diagnosticAnswers?: DiagnosticAnswerDto[];
 };

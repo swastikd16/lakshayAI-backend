@@ -2,67 +2,66 @@ import { Router } from "express";
 import { sendError, sendOk } from "../lib/response";
 import { requireAuth } from "../middleware/auth";
 import {
-  buildWeekDays,
-  ensureActivePlan,
-  getWeekBounds,
-  listWeekPlanItems,
+  buildPlannerCalendarPayload,
+  regenerateMonthWithAgentSafe,
   regenerateWeekPlan,
   regenerateWithAgentSafe
 } from "../services/studyPlanService";
-import { supabaseService } from "../lib/supabase";
+import type { PlannerCalendarView } from "../types/planner";
 
-function formatWeekLabel(start: Date) {
-  const end = new Date(start);
-  end.setDate(start.getDate() + 6);
+function parseView(value: unknown): PlannerCalendarView {
+  return value === "month" ? "month" : "week";
+}
 
-  const startLabel = start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  const endLabel = end.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-  return `${startLabel} - ${endLabel}`;
+function parseAnchor(value: unknown) {
+  if (typeof value !== "string") {
+    return new Date();
+  }
+
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date();
+  }
+
+  return parsed;
 }
 
 export const plannerRouter = Router();
 
 plannerRouter.get("/week", requireAuth, async (req, res) => {
-  const auth = req.auth;
-  if (!auth) {
-    return sendError(res, 401, "Unauthorized", "UNAUTHORIZED");
+  try {
+    const auth = req.auth;
+    if (!auth) {
+      return sendError(res, 401, "Unauthorized", "UNAUTHORIZED");
+    }
+
+    const anchor = parseAnchor(req.query.start);
+    const payload = await buildPlannerCalendarPayload(auth.userId, anchor, "week");
+    return sendOk(res, payload);
+  } catch (error: any) {
+    return sendError(res, 500, error?.message ?? "Failed to load planner week", "PLANNER_WEEK_FAILED");
   }
+});
 
-  const queryStart = typeof req.query.start === "string" ? req.query.start : undefined;
-  const anchor = queryStart ? new Date(`${queryStart}T00:00:00`) : new Date();
-  const { start } = getWeekBounds(anchor);
+plannerRouter.get("/calendar", requireAuth, async (req, res) => {
+  try {
+    const auth = req.auth;
+    if (!auth) {
+      return sendError(res, 401, "Unauthorized", "UNAUTHORIZED");
+    }
 
-  const [items, weakTopicsRows, plan] = await Promise.all([
-    listWeekPlanItems(auth.userId, anchor),
-    supabaseService
-      .from("revision_items")
-      .select("id,subject,topic,risk_level,retention_estimate")
-      .eq("user_id", auth.userId)
-      .order("updated_at", { ascending: false })
-      .limit(5),
-    ensureActivePlan(auth.userId)
-  ]);
-
-  const weakTopics = (weakTopicsRows.data ?? []).map((row: any) => ({
-    id: row.id,
-    title: `${row.subject}: ${row.topic}`,
-    riskLevel: row.risk_level as string,
-    retentionEstimate: Number(row.retention_estimate ?? 0),
-    severity: row.risk_level?.toUpperCase() ?? "MEDIUM",
-    copy: `Retention at ${Number(row.retention_estimate ?? 0)}%. Prioritized in morning blocks.`,
-    icon: row.risk_level === "critical" ? "error" : row.risk_level === "high" ? "warning" : "priority_high"
-  }));
-
-  return sendOk(res, {
-    weekStartDate: start.toISOString().slice(0, 10),
-    weekLabel: formatWeekLabel(start),
-    weekDays: buildWeekDays(start),
-    items,
-    weakTopics,
-    focusMessage: plan.focus_message ?? "Generate your plan to see AI rebalance reasoning.",
-    plannerSource: (plan.planner_source ?? "fallback") as "llm" | "fallback",
-    usedFallback: Boolean(plan.used_fallback ?? true)
-  });
+    const view = parseView(req.query.view);
+    const anchor = parseAnchor(req.query.start);
+    const payload = await buildPlannerCalendarPayload(auth.userId, anchor, view);
+    return sendOk(res, payload);
+  } catch (error: any) {
+    return sendError(
+      res,
+      500,
+      error?.message ?? "Failed to load planner calendar",
+      "PLANNER_CALENDAR_FAILED"
+    );
+  }
 });
 
 plannerRouter.post("/regenerate", requireAuth, async (req, res) => {
@@ -71,30 +70,39 @@ plannerRouter.post("/regenerate", requireAuth, async (req, res) => {
     return sendError(res, 401, "Unauthorized", "UNAUTHORIZED");
   }
 
-  const queryStart = typeof req.body?.start === "string" ? req.body.start : undefined;
-  const anchor = queryStart ? new Date(`${queryStart}T00:00:00`) : new Date();
+  const view = parseView(req.body?.view);
+  const anchor = parseAnchor(req.body?.start);
+
+  if (view === "month") {
+    try {
+      await regenerateMonthWithAgentSafe(auth.userId, anchor);
+      const payload = await buildPlannerCalendarPayload(auth.userId, anchor, "month");
+      return sendOk(res, {
+        ...payload,
+        focusMessage:
+          payload.focusMessage ||
+          "Weak topics were distributed across the month for steady coverage and spaced revision."
+      });
+    } catch (error: any) {
+      return sendError(
+        res,
+        500,
+        error?.message ?? "Failed to regenerate monthly calendar",
+        "PLANNER_MONTH_REGENERATE_FAILED"
+      );
+    }
+  }
 
   try {
-    const result = await regenerateWithAgentSafe(auth.userId, anchor);
-    const { start } = getWeekBounds(anchor);
-
-    return sendOk(res, {
-      weekStartDate: start.toISOString().slice(0, 10),
-      weekLabel: formatWeekLabel(start),
-      weekDays: buildWeekDays(start),
-      items: result.items,
-      focusMessage: result.focusMessage,
-      plannerSource: result.plannerSource,
-      usedFallback: result.usedFallback
-    });
+    await regenerateWithAgentSafe(auth.userId, anchor);
+    const payload = await buildPlannerCalendarPayload(auth.userId, anchor, view);
+    return sendOk(res, payload);
   } catch (err: any) {
     try {
       const fallbackItems = await regenerateWeekPlan(auth.userId, anchor);
-      const { start } = getWeekBounds(anchor);
+      const payload = await buildPlannerCalendarPayload(auth.userId, anchor, view);
       return sendOk(res, {
-        weekStartDate: start.toISOString().slice(0, 10),
-        weekLabel: formatWeekLabel(start),
-        weekDays: buildWeekDays(start),
+        ...payload,
         items: fallbackItems,
         focusMessage: "used default plan: deterministic fallback generated.",
         plannerSource: "fallback" as const,

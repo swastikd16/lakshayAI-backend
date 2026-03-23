@@ -2,7 +2,7 @@ import { Router } from "express";
 import { sendError, sendOk } from "../lib/response";
 import { supabaseService } from "../lib/supabase";
 import { requireAuth } from "../middleware/auth";
-import { getExpandedAttempts, getLatestExamType } from "../services/dataHelpers";
+import { getAdaptiveQuestion, getQuestionExplanation, getQuestionHint } from "../services/adaptiveQuestionService";
 import { regenerateWithAgentSafe } from "../services/studyPlanService";
 
 function normalizeOptions(options: Record<string, string>) {
@@ -19,40 +19,29 @@ function normalizeOptions(options: Record<string, string>) {
   ];
 }
 
-async function pickQuestion(userId: string, topic?: string, difficulty?: string) {
-  const examType = await getLatestExamType(userId);
-
-  let query = supabaseService
-    .from("questions")
-    .select("id,subject,topic,difficulty,prompt,options,correct_option,solution_steps")
-    .eq("exam_type", examType)
-    .limit(1);
-
-  if (topic) {
-    query = query.ilike("topic", `%${topic}%`);
-  }
-
-  if (difficulty && ["easy", "medium", "hard", "adaptive"].includes(difficulty)) {
-    query = query.eq("difficulty", difficulty);
-  }
-
-  const { data, error } = await query;
-
-  if (error || !data || data.length === 0) {
-    const fallback = await supabaseService
-      .from("questions")
-      .select("id,subject,topic,difficulty,prompt,options,correct_option,solution_steps")
-      .limit(1)
-      .maybeSingle();
-
-    if (fallback.error || !fallback.data) {
-      return null;
-    }
-
-    return fallback.data;
-  }
-
-  return data[0] as any;
+function formatQuestion(question: {
+  id: string;
+  subject: string;
+  topic: string;
+  difficulty: string;
+  prompt: string;
+  options: Record<string, string>;
+  solution_steps: string[];
+  correct_option?: string;
+  source?: string;
+}) {
+  return {
+    id: question.id,
+    subject: question.subject,
+    topic: question.topic,
+    difficulty: question.difficulty,
+    prompt: question.prompt,
+    options: normalizeOptions(question.options),
+    solutionSteps: Array.isArray(question.solution_steps) ? question.solution_steps : [],
+    correctOption: question.correct_option ?? null,
+    verifiedAnswer: question.correct_option ?? null,
+    source: question.source ?? null
+  };
 }
 
 async function computeSessionSummary(sessionId: string) {
@@ -82,6 +71,125 @@ async function computeSessionSummary(sessionId: string) {
   };
 }
 
+function clampIntervalHours(value: number) {
+  return Math.max(1, Math.min(168, Math.round(value)));
+}
+
+async function listSessionTopics(sessionId: string): Promise<Array<{ subject: string; topic: string }>> {
+  const { data: attempts, error: attemptsError } = await supabaseService
+    .from("practice_attempts")
+    .select("question_id")
+    .eq("session_id", sessionId);
+
+  if (attemptsError) {
+    throw attemptsError;
+  }
+
+  const questionIds = [...new Set((attempts ?? []).map((item: any) => String(item.question_id)).filter(Boolean))];
+  if (questionIds.length === 0) {
+    return [];
+  }
+
+  const { data: questions, error: questionsError } = await supabaseService
+    .from("questions")
+    .select("id,subject,topic")
+    .in("id", questionIds);
+
+  if (questionsError) {
+    throw questionsError;
+  }
+
+  const unique = new Map<string, { subject: string; topic: string }>();
+  (questions ?? []).forEach((row: any) => {
+    const subject = String(row.subject ?? "").trim();
+    const topic = String(row.topic ?? "").trim();
+    if (!subject) return;
+    unique.set(`${subject}::${topic}`.toLowerCase(), { subject, topic });
+  });
+
+  return [...unique.values()];
+}
+
+async function syncRevisionRetentionAfterSession(userId: string, sessionId: string) {
+  const sessionTopics = await listSessionTopics(sessionId);
+  if (sessionTopics.length === 0) {
+    return;
+  }
+
+  const now = new Date();
+  const candidateMap = new Map<string, any>();
+
+  for (const item of sessionTopics) {
+    const subject = String(item.subject ?? "").trim();
+    const topic = String(item.topic ?? "").trim();
+    if (!subject) {
+      continue;
+    }
+
+    const exactTopicMatch = await supabaseService
+      .from("revision_items")
+      .select("id,subject,topic,last_review_at,created_at,risk_level")
+      .eq("user_id", userId)
+      .eq("queue_enabled", true)
+      .ilike("subject", subject)
+      .ilike("topic", topic || "__no_match__");
+
+    if (!exactTopicMatch.error && (exactTopicMatch.data ?? []).length > 0) {
+      (exactTopicMatch.data ?? []).forEach((row: any) => {
+        candidateMap.set(String(row.id), row);
+      });
+      continue;
+    }
+
+    const subjectMatch = await supabaseService
+      .from("revision_items")
+      .select("id,subject,topic,last_review_at,created_at,risk_level")
+      .eq("user_id", userId)
+      .eq("queue_enabled", true)
+      .ilike("subject", subject);
+
+    if (!subjectMatch.error) {
+      (subjectMatch.data ?? []).forEach((row: any) => {
+        candidateMap.set(String(row.id), row);
+      });
+    }
+  }
+
+  for (const row of candidateMap.values()) {
+    const baselineTime = row.last_review_at ?? row.created_at ?? null;
+    const lastReviewAt = baselineTime ? new Date(baselineTime) : null;
+    const elapsedHours =
+      lastReviewAt && !Number.isNaN(lastReviewAt.getTime())
+        ? (now.getTime() - lastReviewAt.getTime()) / (1000 * 60 * 60)
+        : 24;
+    const intervalHours = clampIntervalHours(elapsedHours > 0 ? elapsedHours : 24);
+    const nextReview = new Date(now);
+    nextReview.setHours(now.getHours() + intervalHours);
+
+    const { error: updateError } = await supabaseService
+      .from("revision_items")
+      .update({
+        retention_estimate: 100,
+        risk_level: "low",
+        last_review_at: now.toISOString(),
+        next_review_at: nextReview.toISOString()
+      })
+      .eq("id", row.id)
+      .eq("user_id", userId);
+
+    if (updateError) {
+      throw updateError;
+    }
+
+    await supabaseService.from("revision_reviews").insert({
+      revision_item_id: row.id,
+      outcome: "easy",
+      next_interval_hours: intervalHours,
+      notes: `Auto-updated from adaptive session (${row.subject} / ${row.topic}) interval=${intervalHours}h`
+    });
+  }
+}
+
 export const adaptiveRouter = Router();
 
 adaptiveRouter.post("/session/start", requireAuth, async (req, res) => {
@@ -92,6 +200,7 @@ adaptiveRouter.post("/session/start", requireAuth, async (req, res) => {
 
   const moduleName = req.body?.module ?? null;
   const topic = req.body?.topic ?? null;
+  const subject = req.body?.subject ?? null;
   const difficulty = req.body?.difficulty ?? "adaptive";
 
   const { data: session, error: sessionError } = await supabaseService
@@ -110,8 +219,13 @@ adaptiveRouter.post("/session/start", requireAuth, async (req, res) => {
     return sendError(res, 500, sessionError?.message ?? "Unable to start session", "SESSION_START_FAILED");
   }
 
-  const question = await pickQuestion(auth.userId, topic ?? undefined, difficulty);
-  if (!question) {
+  const resolved = await getAdaptiveQuestion({
+    userId: auth.userId,
+    topic: topic ?? undefined,
+    subject: subject ?? undefined,
+    difficulty
+  });
+  if (!resolved?.question) {
     return sendError(res, 404, "No question available", "QUESTION_NOT_FOUND");
   }
 
@@ -119,20 +233,131 @@ adaptiveRouter.post("/session/start", requireAuth, async (req, res) => {
     session: {
       id: session.id,
       module: session.module,
-      topic: session.topic,
+      topic: session.topic ?? resolved.question.topic,
+      subject: resolved.question.subject,
       difficulty: session.difficulty,
       status: session.status,
       startedAt: session.started_at
     },
-    question: {
-      id: question.id,
-      subject: question.subject,
-      topic: question.topic,
-      difficulty: question.difficulty,
-      prompt: question.prompt,
-      options: normalizeOptions((question.options ?? {}) as Record<string, string>),
-      solutionSteps: Array.isArray(question.solution_steps) ? question.solution_steps : []
-    }
+    question: formatQuestion({
+      ...resolved.question,
+      source: resolved.source
+    })
+  });
+});
+
+adaptiveRouter.post("/session/:id/question/next", requireAuth, async (req, res) => {
+  const auth = req.auth;
+  if (!auth) {
+    return sendError(res, 401, "Unauthorized", "UNAUTHORIZED");
+  }
+
+  const sessionId = req.params.id;
+  const subject = typeof req.body?.subject === "string" ? req.body.subject.trim() : undefined;
+
+  const { data: session, error: sessionError } = await supabaseService
+    .from("practice_sessions")
+    .select("id,module,topic,difficulty,status")
+    .eq("id", sessionId)
+    .eq("user_id", auth.userId)
+    .maybeSingle();
+
+  if (sessionError || !session) {
+    return sendError(res, 404, "Session not found", "SESSION_NOT_FOUND");
+  }
+
+  if (session.status !== "in_progress") {
+    return sendError(res, 409, "Session is not active", "SESSION_NOT_ACTIVE");
+  }
+
+  const { data: attempts, error: attemptsError } = await supabaseService
+    .from("practice_attempts")
+    .select("question_id")
+    .eq("session_id", sessionId);
+
+  if (attemptsError) {
+    return sendError(res, 500, attemptsError.message, "ATTEMPT_FETCH_FAILED");
+  }
+
+  const excludeQuestionIds = [...new Set((attempts ?? []).map((item: any) => String(item.question_id)).filter(Boolean))];
+  const resolved = await getAdaptiveQuestion({
+    userId: auth.userId,
+    topic: session.topic ?? undefined,
+    subject,
+    difficulty: session.difficulty ?? "adaptive",
+    excludeQuestionIds
+  });
+
+  if (!resolved?.question) {
+    return sendError(res, 404, "No follow-up question available", "QUESTION_NOT_FOUND");
+  }
+
+  return sendOk(res, {
+    session: {
+      id: session.id,
+      module: session.module,
+      topic: session.topic ?? resolved.question.topic,
+      subject: resolved.question.subject,
+      difficulty: session.difficulty,
+      status: session.status
+    },
+    question: formatQuestion({
+      ...resolved.question,
+      source: resolved.source
+    })
+  });
+});
+
+adaptiveRouter.post("/session/:id/hint", requireAuth, async (req, res) => {
+  const auth = req.auth;
+  if (!auth) {
+    return sendError(res, 401, "Unauthorized", "UNAUTHORIZED");
+  }
+
+  const sessionId = req.params.id;
+  const questionId = typeof req.body?.questionId === "string" ? req.body.questionId.trim() : "";
+  const selectedOption = typeof req.body?.selectedOption === "string" ? req.body.selectedOption.trim() : null;
+
+  if (!questionId) {
+    return sendError(res, 400, "questionId is required", "BAD_REQUEST");
+  }
+
+  const { data: session, error: sessionError } = await supabaseService
+    .from("practice_sessions")
+    .select("id")
+    .eq("id", sessionId)
+    .eq("user_id", auth.userId)
+    .maybeSingle();
+
+  if (sessionError || !session) {
+    return sendError(res, 404, "Session not found", "SESSION_NOT_FOUND");
+  }
+
+  const { data: question, error: questionError } = await supabaseService
+    .from("questions")
+    .select("id,subject,topic,difficulty,prompt,options,solution_steps")
+    .eq("id", questionId)
+    .maybeSingle();
+
+  if (questionError || !question) {
+    return sendError(res, 404, "Question not found", "QUESTION_NOT_FOUND");
+  }
+
+  const hint = await getQuestionHint(
+    {
+      subject: String(question.subject ?? "General"),
+      topic: String(question.topic ?? "Concept"),
+      difficulty: String(question.difficulty ?? "adaptive"),
+      prompt: String(question.prompt ?? "Question unavailable"),
+      options: (question.options ?? {}) as Record<string, string>,
+      solution_steps: question.solution_steps
+    },
+    selectedOption
+  );
+
+  return sendOk(res, {
+    hint: hint.hint,
+    source: hint.source
   });
 });
 
@@ -162,7 +387,7 @@ adaptiveRouter.post("/session/:id/attempt", requireAuth, async (req, res) => {
 
   const { data: question, error: questionError } = await supabaseService
     .from("questions")
-    .select("id,correct_option")
+    .select("id,subject,topic,difficulty,prompt,options,correct_option,solution_steps")
     .eq("id", questionId)
     .maybeSingle();
 
@@ -188,10 +413,34 @@ adaptiveRouter.post("/session/:id/attempt", requireAuth, async (req, res) => {
     return sendError(res, 500, insertError?.message ?? "Unable to save attempt", "ATTEMPT_SAVE_FAILED");
   }
 
+  const explanation = isCorrect
+    ? {
+        solutionSteps: Array.isArray(question.solution_steps) ? question.solution_steps : [],
+        aiSolution: "",
+        source: "stored" as const
+      }
+    : await getQuestionExplanation(
+        {
+          id: String(question.id),
+          subject: String(question.subject ?? "General"),
+          topic: String(question.topic ?? "Concept"),
+          difficulty: String(question.difficulty ?? "adaptive"),
+          prompt: String(question.prompt ?? "Question unavailable"),
+          options: (question.options ?? {}) as Record<string, string>,
+          correct_option: String(question.correct_option ?? ""),
+          solution_steps: question.solution_steps
+        },
+        String(selectedOption)
+      );
+
   return sendOk(res, {
     attemptId: inserted.id,
     isCorrect,
     selectedOption,
+    correctOption: String(question.correct_option),
+    solutionSteps: isCorrect ? [] : explanation.solutionSteps,
+    aiSolution: isCorrect ? null : explanation.aiSolution,
+    explanationSource: isCorrect ? null : explanation.source,
     createdAt: inserted.created_at
   });
 });
@@ -233,6 +482,15 @@ adaptiveRouter.post("/session/:id/complete", requireAuth, async (req, res) => {
 
   if (updateError || !updated) {
     return sendError(res, 500, updateError?.message ?? "Unable to complete session", "SESSION_COMPLETE_FAILED");
+  }
+
+  try {
+    await syncRevisionRetentionAfterSession(auth.userId, sessionId);
+  } catch (syncError: any) {
+    console.warn(
+      "[revision] Retention sync after adaptive session complete failed:",
+      syncError?.message ?? syncError
+    );
   }
 
   try {
@@ -308,6 +566,7 @@ async function buildAdaptiveReview(userId: string, sessionId: string) {
   });
 
   const incorrect = reviewItems.filter((item) => item.status === "incorrect");
+  const retrySeed = incorrect[0] ?? reviewItems[0] ?? null;
 
   const conceptMap = new Map<string, number>();
   incorrect.forEach((item) => {
@@ -325,6 +584,7 @@ async function buildAdaptiveReview(userId: string, sessionId: string) {
       id: session.id,
       module: session.module,
       topic: session.topic,
+      subject: retrySeed?.subject ?? null,
       startedAt: session.started_at,
       endedAt: session.ended_at,
       scorePercent: Number(session.score_percent ?? 0),
