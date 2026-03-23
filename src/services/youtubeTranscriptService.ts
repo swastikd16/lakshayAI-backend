@@ -36,6 +36,14 @@ export type TranscriptResult = {
 };
 
 function mapTranscriptError(code: string, message: string) {
+  if (message.includes("No module named 'youtube_transcript_api'")) {
+    return {
+      status: 500,
+      code: "PYTHON_DEPENDENCY_MISSING",
+      message: "Python dependency missing: install with `pip install -r scripts/requirements.txt`."
+    };
+  }
+
   switch (code) {
     case "VIDEO_NOT_FOUND":
       return { status: 404, code, message };
@@ -122,7 +130,9 @@ export async function fetchYoutubeTranscript(
       resolved = true;
       clearTimeout(timer);
 
-      const parsed = parsePayload(stdout.trim());
+      const stdoutText = stdout.trim();
+      const stderrText = stderr.trim();
+      const parsed = parsePayload(stdoutText);
       if (parsed.ok) {
         resolve(parsed);
         return;
@@ -130,13 +140,19 @@ export async function fetchYoutubeTranscript(
       const failed = parsed as TranscriptScriptFailure;
 
       const derivedErrorCode =
-        failed.errorCode ||
+        failed.errorCode === "INVALID_SCRIPT_OUTPUT" && stderrText
+          ? "PYTHON_SCRIPT_FAILED"
+          : failed.errorCode ||
         (code === 0 ? "TRANSCRIPT_UNAVAILABLE" : "PYTHON_SCRIPT_FAILED");
+      const derivedMessage =
+        failed.errorCode === "INVALID_SCRIPT_OUTPUT" && stderrText
+          ? stderrText
+          : failed.message || stderrText || "Unable to fetch transcript.";
 
       resolve({
         ok: false,
         errorCode: derivedErrorCode,
-        message: failed.message || stderr.trim() || "Unable to fetch transcript."
+        message: derivedMessage
       });
     });
   });

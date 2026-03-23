@@ -3,7 +3,7 @@ import { sendError, sendOk } from "../lib/response";
 import { requireAuth } from "../middleware/auth";
 import { parseYoutubeVideoId, buildCanonicalYoutubeUrl } from "../services/youtubeUrlService";
 import { fetchYoutubeTranscript } from "../services/youtubeTranscriptService";
-import { generateMultimodalSummary } from "../services/multimodalSummarizerService";
+import { generateMultimodalSummary, generateMermaidFromTranscript } from "../services/multimodalSummarizerService";
 import { supabaseService } from "../lib/supabase";
 
 type VideoNotesRow = {
@@ -91,7 +91,7 @@ multimodalRouter.post("/youtube/process", requireAuth, async (req, res) => {
         transcript_segments_json: transcript.segments,
         notes_markdown: summary.notesMarkdown,
         concept_summary: summary.conceptSummary,
-        mermaid_code: summary.mermaidCode,
+        mermaid_code: "",
         key_topics: summary.keyTopics,
         status: "completed"
       })
@@ -112,6 +112,65 @@ multimodalRouter.post("/youtube/process", requireAuth, async (req, res) => {
     const code = typeof error?.code === "string" ? error.code : "VIDEO_PROCESS_FAILED";
     return sendError(res, status, error?.message ?? "Failed to process video", code);
   }
+});
+
+multimodalRouter.post("/youtube/:id/flowchart", requireAuth, async (req, res) => {
+  const auth = req.auth;
+  if (!auth) {
+    return sendError(res, 401, "Unauthorized", "UNAUTHORIZED");
+  }
+
+  const id = String(req.params.id ?? "").trim();
+  if (!id) {
+    return sendError(res, 400, "id is required", "BAD_REQUEST");
+  }
+
+  const { data: existing, error: fetchError } = await supabaseService
+    .from("multimodal_video_notes")
+    .select(
+      "id,transcript_text,youtube_url,video_id,video_title,transcript_language,transcript_source,transcript_segments_json,notes_markdown,concept_summary,mermaid_code,key_topics,status,created_at,updated_at"
+    )
+    .eq("id", id)
+    .eq("user_id", auth.userId)
+    .maybeSingle();
+
+  if (fetchError) {
+    return sendError(res, 500, fetchError.message, "VIDEO_NOTES_FETCH_FAILED");
+  }
+  if (!existing) {
+    return sendError(res, 404, "Video notes item not found", "NOT_FOUND");
+  }
+
+  const transcript = String(existing.transcript_text ?? "").trim();
+  if (!transcript) {
+    return sendError(res, 422, "Transcript is required before generating flowchart", "TRANSCRIPT_REQUIRED");
+  }
+
+  const flowchart = await generateMermaidFromTranscript(transcript);
+  const { data: updated, error: updateError } = await supabaseService
+    .from("multimodal_video_notes")
+    .update({
+      mermaid_code: flowchart.mermaidCode
+    })
+    .eq("id", id)
+    .eq("user_id", auth.userId)
+    .select(
+      "id,youtube_url,video_id,video_title,transcript_language,transcript_source,transcript_text,transcript_segments_json,notes_markdown,concept_summary,mermaid_code,key_topics,status,created_at,updated_at"
+    )
+    .single();
+
+  if (updateError || !updated) {
+    return sendError(
+      res,
+      500,
+      updateError?.message ?? "Unable to save flowchart",
+      "FLOWCHART_SAVE_FAILED"
+    );
+  }
+
+  return sendOk(res, mapRowToDto(updated as VideoNotesRow), {
+    flowchartSource: flowchart.source
+  });
 });
 
 multimodalRouter.get("/youtube/history", requireAuth, async (req, res) => {
