@@ -12,6 +12,7 @@ import { doubtRouter } from "./routes/doubt";
 import { revisionRouter } from "./routes/revision";
 import { analyticsRouter } from "./routes/analytics";
 import { profileRouter } from "./routes/profile";
+import { multimodalRouter } from "./routes/multimodal";
 
 export function createApp() {
   const app = express();
@@ -35,6 +36,7 @@ export function createApp() {
   app.use("/revision", revisionRouter);
   app.use("/analytics", analyticsRouter);
   app.use("/profile", profileRouter);
+  app.use("/multimodal", multimodalRouter);
 
   return app;
 }

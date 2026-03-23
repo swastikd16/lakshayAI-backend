@@ -25,6 +25,9 @@ export const env = {
   openaiApiKey: process.env.OPENAI_API_KEY ?? null,
   openaiModel: process.env.OPENAI_MODEL ?? "gpt-5-mini",
   plannerLlmTimeoutMs: Number(process.env.PLANNER_LLM_TIMEOUT_MS ?? 20000),
+  pythonBin: process.env.PYTHON_BIN ?? "python",
+  youtubeTranscriptTimeoutMs: Number(process.env.YOUTUBE_TRANSCRIPT_TIMEOUT_MS ?? 15000),
+  multimodalMaxTranscriptChars: Number(process.env.MULTIMODAL_MAX_TRANSCRIPT_CHARS ?? 24000),
 
   // Doubt AI runtime diagnostics
   doubtAiDebug: String(process.env.DOUBT_AI_DEBUG ?? "false").toLowerCase() === "true",
